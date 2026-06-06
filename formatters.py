@@ -428,6 +428,90 @@ def format_webhook_create_message(
     return "\n".join(message_lines)
 
 
+def format_webhook_push_message(
+    repo: str,
+    payload: dict[str, Any],
+) -> str | None:
+    """Format push notification message from webhook."""
+    ref = payload.get("ref", "")
+    # ref is like "refs/heads/main" or "refs/tags/v1.0"
+    if ref.startswith("refs/heads/"):
+        branch = ref.replace("refs/heads/", "")
+        ref_type = "分支"
+    elif ref.startswith("refs/tags/"):
+        branch = ref.replace("refs/tags/", "")
+        ref_type = "标签"
+    else:
+        branch = ref
+        ref_type = "引用"
+
+    sender = payload.get("sender")
+    actor = (sender or {}).get("login") or "未知"
+
+    commits = payload.get("commits", [])
+    if not isinstance(commits, list) or not commits:
+        return None
+
+    message_lines = [
+        f"[GitHub Webhook] 仓库 {repo} 的 Push 事件",
+        f"推送到 {ref_type}: {branch}",
+        f"触发人: {actor}",
+        f"提交数: {len(commits)}",
+    ]
+
+    # Show commit messages (limit to first 5)
+    for commit in commits[:5]:
+        sha = commit.get("id", "?")[:7]
+        msg = commit.get("message", "").split("\n")[0]
+        author = commit.get("author", {}).get("name", "未知")
+        message_lines.append(f"  - {sha} {truncate_text(msg, 80)} ({author})")
+
+    if len(commits) > 5:
+        message_lines.append(f"  ... 还有 {len(commits) - 5} 个提交")
+
+    # Use the compare URL if available
+    compare_url = payload.get("compare")
+    if compare_url:
+        message_lines.append(f"链接: {compare_url}")
+
+    return "\n".join(message_lines)
+
+
+def format_poll_push_notification(
+    repo: str,
+    commits: list[dict[str, Any]],
+) -> str:
+    """Format push notification message from polled commits."""
+    if not commits:
+        return ""
+
+    # Group commits by author
+    author_commits: dict[str, list[dict[str, Any]]] = {}
+    for commit in commits:
+        author = commit["commit"]["author"]["name"]
+        if author not in author_commits:
+            author_commits[author] = []
+        author_commits[author].append(commit)
+
+    message_lines = [
+        f"[GitHub Push] 仓库 {repo} 有新的提交:",
+    ]
+
+    for author, author_commit_list in author_commits.items():
+        message_lines.append(f"作者: {author}")
+        for commit in author_commit_list:
+            sha = commit["sha"][:7]
+            msg = commit["commit"]["message"].split("\n")[0]
+            message_lines.append(f"  - {sha} {truncate_text(msg, 80)}")
+
+    # Use the latest commit for the link
+    latest_commit = commits[-1]
+    if latest_commit.get("html_url"):
+        message_lines.append(f"链接: {latest_commit['html_url']}")
+
+    return "\n".join(message_lines)
+
+
 def format_issue_details(repo: str, issue_data: dict[str, Any]) -> str:
     if "pull_request" in issue_data:
         return f"#{issue_data['number']} 是一个 PR，请使用 /ghpr 命令查看详情"

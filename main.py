@@ -33,6 +33,7 @@ GITHUB_ISSUES_API_URL = "https://api.github.com/repos/{repo}/issues"
 GITHUB_ISSUE_API_URL = "https://api.github.com/repos/{repo}/issues/{issue_number}"
 GITHUB_PR_API_URL = "https://api.github.com/repos/{repo}/pulls/{pr_number}"
 GITHUB_RATE_LIMIT_URL = "https://api.github.com/rate_limit"
+GITHUB_COMMITS_API_URL = "https://api.github.com/repos/{repo}/commits"
 
 # Path for storing subscription data
 SUBSCRIPTION_FILE = "data/github_subscriptions.json"
@@ -399,12 +400,19 @@ class MyPlugin(Star):
                 # Fetch new issues and PRs
                 new_items = await self._fetch_new_items(repo, last_check)
 
-                if new_items:
+                # Fetch new commits for push notifications
+                new_commits = await self._fetch_new_commits(repo, last_check)
+
+                if new_items or new_commits:
                     # Update last check time
                     self.last_check_time[repo] = datetime.now().isoformat()
 
                     # Notify subscribers about new items
                     await self._notify_subscribers(repo, new_items)
+
+                    # Notify subscribers about new commits (push events)
+                    if new_commits:
+                        await self._notify_push_subscribers(repo, new_commits)
             except Exception as e:
                 logger.error(f"检查仓库 {repo} 更新时出错: {e}")
 
@@ -533,6 +541,28 @@ class MyPlugin(Star):
             except Exception as e:
                 logger.error(f"向订阅者 {subscriber_id} 发送通知时出错: {e}")
 
+    async def _notify_push_subscribers(self, repo: str, new_commits: list[dict[str, Any]]):
+        """Notify subscribers about new commits (push events)"""
+        if not new_commits:
+            return
+
+        repo_key = self._resolve_repo_key(repo) or repo
+
+        message = formatters.format_poll_push_notification(repo, new_commits)
+        if not message:
+            return
+
+        for subscriber_id in self.subscriptions.get(repo_key, []):
+            try:
+                await self.context.send_message(
+                    subscriber_id, MessageChain(chain=[Comp.Plain(message)])
+                )
+
+                # Add a small delay between messages to avoid rate limiting
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"向订阅者 {subscriber_id} 发送 Push 通知时出错: {e}")
+
     async def handle_webhook_event(
         self, event_type: str, payload: dict[str, Any]
     ) -> None:
@@ -639,6 +669,10 @@ class MyPlugin(Star):
         elif event_type == "create":
             message = formatters.format_webhook_create_message(
                 repo_full_name, payload, sender
+            )
+        elif event_type == "push":
+            message = formatters.format_webhook_push_message(
+                repo_full_name, payload
             )
         else:
             logger.debug(f"暂不处理的 GitHub Webhook 事件类型: {event_type}")
@@ -887,6 +921,70 @@ class MyPlugin(Star):
         except Exception as e:
             logger.error(f"获取 API 速率限制信息时出错: {e}")
             yield event.plain_result(f"获取 API 速率限制信息时出错: {str(e)}")
+
+    async def _fetch_new_commits(self, repo: str, last_check: str | None) -> list[dict[str, Any]]:
+        """Fetch new commits from a repository since last check via polling."""
+        if not last_check:
+            logger.info(f"仓库 {repo} 首次检查 commit，跳过推送通知")
+            return []
+
+        try:
+            last_check_dt = datetime.fromisoformat(last_check)
+            if hasattr(last_check_dt, "tzinfo") and last_check_dt.tzinfo is not None:
+                last_check_dt = last_check_dt.replace(tzinfo=None)
+
+            logger.debug(f"仓库 {repo} 的 commit 上次检查时间: {last_check_dt.isoformat()}")
+            new_commits: list[dict[str, Any]] = []
+
+            async with aiohttp.ClientSession() as session:
+                try:
+                    params = {
+                        "per_page": 20,
+                    }
+                    async with session.get(
+                        GITHUB_COMMITS_API_URL.format(repo=repo),
+                        params=params,
+                        headers=self._get_github_headers(),
+                    ) as resp:
+                        if resp.status == 200:
+                            commits = await resp.json()
+
+                            for commit in commits:
+                                github_timestamp = commit["commit"]["committer"]["date"].replace("Z", "")
+                                committed_at = datetime.fromisoformat(github_timestamp)
+                                committed_at = committed_at.replace(tzinfo=None)
+
+                                logger.debug(
+                                    f"比较: 仓库 {repo} 的 commit {commit['sha'][:7]} 提交于 {committed_at.isoformat()}, 上次检查: {last_check_dt.isoformat()}"
+                                )
+
+                                if committed_at > last_check_dt:
+                                    logger.info(
+                                        f"发现新的 commit {commit['sha'][:7]} in {repo}"
+                                    )
+                                    new_commits.append(commit)
+                                else:
+                                    logger.debug(f"没有更多新 commits in {repo}")
+                                    break
+                        else:
+                            text = await resp.text()
+                            if len(text) > 100:
+                                text = text[:100] + "..."
+                            logger.error(
+                                f"获取仓库 {repo} 的 commits 失败: {resp.status}: {text}"
+                            )
+                except Exception as e:
+                    logger.error(f"获取仓库 {repo} 的 commits 时出错: {e}")
+
+            if new_commits:
+                logger.info(f"找到 {len(new_commits)} 个新的 commits 在 {repo}")
+            else:
+                logger.debug(f"没有找到新的 commits 在 {repo}")
+
+            return new_commits
+        except Exception as e:
+            logger.error(f"处理 commit 时间时出错: {e}")
+            return []
 
     async def _fetch_rate_limit(self) -> dict[str, Any] | None:
         """Fetch rate limit information from GitHub API"""
