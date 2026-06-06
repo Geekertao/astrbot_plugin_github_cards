@@ -45,10 +45,10 @@ LINK_SETTINGS_FILE = "data/github_link_settings.json"
 
 @register(
     "astrbot_plugin_github_cards",
-    "Soulter",
+    "Geekertao",
     "根据群聊中 GitHub 相关链接自动发送 GitHub OpenGraph 图片，支持订阅仓库的 Issue 和 PR",
     "1.1.0",
-    "https://github.com/Soulter/astrbot_plugin_github_cards",
+    "https://github.com/Geekertao/astrbot_plugin_github_cards",
 )
 class MyPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
